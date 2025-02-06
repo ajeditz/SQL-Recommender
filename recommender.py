@@ -304,6 +304,44 @@ class TravelRecommender:
             self.logger.error(f"Error in process_post_content: {str(e)}")
             raise
 
+    def get_similar_posts(self, post_id: int, n_recommendations: int = 5) -> List[Dict]:
+        """
+        Get similar posts based on content-based filtering for a given post_id.
+        
+        Parameters:
+        - post_id (int): The ID of the post to find similar posts for.
+        - n_recommendations (int): Number of similar posts to recommend.
+        
+        Returns:
+        - List[Dict]: A list of dictionaries containing similar posts with their scores.
+        """
+        try:
+            # Find the index of the given post_id in the post_features DataFrame
+            post_idx = self.post_features[self.post_features['post_id'] == post_id].index[0]
+            
+            # Get the similarity scores for the given post from the similarity matrix
+            sim_scores = self.similarity_matrix[post_idx]
+            
+            # Sort the similarity scores in descending order and get the top n_recommendations
+            similar_indices = np.argsort(sim_scores)[::-1][1:n_recommendations + 1]  # Exclude the post itself
+            
+            # Prepare the recommendations
+            recommendations = []
+            for idx in similar_indices:
+                recommendations.append({
+                    'post_id': int(self.post_features.iloc[idx]['post_id']),
+                    'score': float(sim_scores[idx]),
+                    'type': 'content'
+                })
+            
+            return recommendations
+        
+        except IndexError:
+            self.logger.error(f"Post ID {post_id} not found in post_features.")
+            return []
+        except Exception as e:
+            self.logger.error(f"Error in get_similar_posts: {str(e)}")
+            return []
 
     def get_content_based_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
         """Get content-based recommendations with caching"""

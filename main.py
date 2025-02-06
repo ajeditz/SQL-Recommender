@@ -32,6 +32,15 @@ class TrendingRecommendationsRequest(BaseModel):
     )
     detailed_response:bool =False
 
+class MoreLikeThisRequest(BaseModel):
+    num_recommendations: int = Field(
+        default=10, 
+        ge=1, 
+        le=50, 
+        description="Number of similar posts to return"
+    )
+    post_id:int
+
 class AddInteraction(BaseModel):
     user_id: int = Field(..., description="User ID performing the interaction")
     post_id: int = Field(..., description="Post ID being interacted with")
@@ -121,6 +130,32 @@ async def get_collaborative_recommendations(request: RecommendationRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+@app.post('/more_like_this')
+async def get_similar_posts(request:MoreLikeThisRequest):
+    try:
+        recommendations = recommender.get_similar_posts(
+            n_recommendations=request.num_recommendations,
+            post_id=request.post_id
+
+        )
+
+        if not recommendations:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No similar posts found for {request.post_id}"
+            )
+
+        return {
+            "post_id": request.post_id,
+            "num_recommendations": len(recommendations),
+            "recommendations": recommendations
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 @app.post("/interactions",  # Changed from "add_interaction" for consistency
           response_model_exclude_none=True,
