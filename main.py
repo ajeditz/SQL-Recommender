@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from typing import Literal, Optional, List, Dict 
+import json
 import pandas as pd
 from recommender import TravelRecommender
 
@@ -18,6 +19,13 @@ class RecommendationRequest(BaseModel):
         ge=1, 
         description="Maximum age of connection posts in days"
     )
+    detailed_response: bool = False
+    page: int = Field(default=1, ge=1, description="Page number for paginated results")
+    page_size: int = Field(default=10, ge=1, le=50, description="Number of results per page")
+
+class ExploreRecommendationRequest(BaseModel):
+    user_id: int = Field(..., description="User ID to get recommendations for")
+    num_recommendations: int = Field(default=10, ge=1, le=100, description="Number of recommendations to return")
     detailed_response: bool = False
     page: int = Field(default=1, ge=1, description="Page number for paginated results")
     page_size: int = Field(default=10, ge=1, le=50, description="Number of results per page")
@@ -70,25 +78,76 @@ except Exception as e:
     print(f"Error initializing recommender: {str(e)}")
     raise
 
-@app.post("/recommend", response_model_exclude_none=True, summary="Get personalized recommendations")
-async def recommend_posts(request: RecommendationRequest):
-    try:
-        recommendations = recommender.get_hybrid_recommendations(
-            user_id=request.user_id,
-            n_recommendations=request.num_recommendations,
-            connection_ratio=request.connection_ratio,
-            max_post_age_days=request.max_post_age_days,
-            detailed_response=request.detailed_response
-        )
-        
-        if not recommendations:
-            raise HTTPException(status_code=404, detail=f"No recommendations found for user {request.user_id}")
+from datetime import datetime, timedelta
+import json
 
-        # Paginate the recommendations
+CACHE_EXPIRY_TIME = timedelta(hours=24)  # Expiry time for recommendations
+
+@app.post("/recommend", response_model_exclude_none=True, summary="Get personalized recommendations")
+async def recommend_posts(request: RecommendationRequest, force_refresh: bool = False):
+    """Get personalized hybrid recommendations with caching"""
+
+    try:
+        # Cache keys
+        cache_key = f"recommendations:{request.user_id}:{request.detailed_response}"
+        cache_timestamp_key = f"recommendations_timestamp:{request.user_id}"
+
+        # Check existing cache
+        cached_data = recommender._cache_get(cache_key)
+        cache_timestamp = recommender._cache_get(cache_timestamp_key)
+
+        # Convert timestamp from cache
+        cache_time = datetime.fromisoformat(cache_timestamp.decode()) if cache_timestamp else None
+        cache_expired = cache_time and (datetime.utcnow() - cache_time) > CACHE_EXPIRY_TIME
+
+        if force_refresh or not cached_data or cache_expired:
+            # Fetch new recommendations if cache expired or forced refresh
+            recommendations = recommender.get_hybrid_recommendations(
+                user_id=request.user_id,
+                n_recommendations=request.num_recommendations,
+                connection_ratio=request.connection_ratio,
+                max_post_age_days=request.max_post_age_days,
+                detailed_response=request.detailed_response
+            )
+
+            # Store in cache
+            recommender._cache_set(cache_key, json.dumps(recommendations).encode())
+            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
+        else:
+            # Load from cache
+            try:
+                recommendations = json.loads(cached_data)
+            except json.JSONDecodeError:
+                recommender.logger.error("Error decoding cached recommendations")
+                recommendations = []
+
+        # Handle pagination
+        total_available = len(recommendations)
         start_idx = (request.page - 1) * request.page_size
         end_idx = start_idx + request.page_size
+
+        if start_idx >= total_available:
+            # If exhausted, fetch fresh recommendations
+            recommendations = recommender.get_hybrid_recommendations(
+                user_id=request.user_id,
+                n_recommendations=request.num_recommendations,
+                connection_ratio=request.connection_ratio,
+                max_post_age_days=request.max_post_age_days,
+                detailed_response=request.detailed_response
+            )
+
+            # Update cache
+            recommender._cache_set(cache_key, json.dumps(recommendations).encode())
+            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
+
+            # Reset pagination
+            start_idx, end_idx = 0, request.page_size
+
         paginated_recommendations = recommendations[start_idx:end_idx]
-        
+
+        if not paginated_recommendations:
+            raise HTTPException(status_code=404, detail=f"No recommendations found for user {request.user_id}")
+
         return {
             "user_id": request.user_id,
             "num_recommendations": len(paginated_recommendations),
@@ -97,64 +156,135 @@ async def recommend_posts(request: RecommendationRequest):
             "page_size": request.page_size,
             "recommendations": paginated_recommendations
         }
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+from datetime import datetime, timedelta
+
+CACHE_EXPIRY_TIME = timedelta(hours=24)  # Set cache expiry time (e.g., refresh every 24 hours)
 
 @app.post("/explore",
           response_model_exclude_none=True,
           summary="Get collaborative recommendations")
-async def get_collaborative_recommendations(request: RecommendationRequest):
+async def get_collaborative_recommendations(request: ExploreRecommendationRequest, force_refresh: bool = False):
     """Get recommendations based on collaborative filtering only"""
-    try:
-        recommendations = recommender.get_collaborative_recommendations(
-            user_id=request.user_id,
-            n_recommendations=request.num_recommendations,
-            detailed_response=request.detailed_response  # Fixed typo from 'detailed_respons'
-        )
 
-        if not recommendations:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No collaborative recommendations found for user {request.user_id}"
+    try:
+        cache_key = f"collab_recs:{request.user_id}:{request.detailed_response}"
+        cache_timestamp_key = f"collab_recs_timestamp:{request.user_id}"  # Store cache timestamp
+        
+        # Check if cache exists
+        cached_data = recommender._cache_get(cache_key)
+        cache_timestamp = recommender._cache_get(cache_timestamp_key)
+
+        # Convert timestamp from cache
+        cache_time = datetime.fromisoformat(cache_timestamp.decode()) if cache_timestamp else None
+        cache_expired = cache_time and (datetime.utcnow() - cache_time) > CACHE_EXPIRY_TIME
+
+        if force_refresh or not cached_data or cache_expired:
+            # If forced refresh or cache expired, generate new recommendations
+            recommendations = recommender.get_collaborative_recommendations(
+                user_id=request.user_id,
+                n_recommendations=request.num_recommendations,  # Get max recommendations
+                detailed_response=request.detailed_response
             )
+
+            # Update cache with new recommendations
+            recommender._cache_set(cache_key, json.dumps(recommendations).encode())
+            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
+        else:
+            # Load from cache
+            try:
+                recommendations = json.loads(cached_data)
+            except json.JSONDecodeError:
+                recommender.logger.error("Error decoding cached recommendations")
+                recommendations = []
+
+        # Handle case where recommendations are exhausted
+        total_available = len(recommendations)
+        start_idx = (request.page - 1) * request.page_size
+        end_idx = start_idx + request.page_size
+
+        if start_idx >= total_available:
+            # If no more cached recommendations left, trigger a refresh
+            recommendations = recommender.get_collaborative_recommendations(
+                user_id=request.user_id,
+                n_recommendations=request.num_recommendations,  # Get new recommendations
+                detailed_response=request.detailed_response
+            )
+
+            # Update cache with new recommendations
+            recommender._cache_set(cache_key, json.dumps(recommendations).encode())
+            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
+
+            # Reset pagination
+            start_idx, end_idx = 0, request.page_size
+
+        paginated_recommendations = recommendations[start_idx:end_idx]
 
         return {
             "user_id": request.user_id,
-            "num_recommendations": len(recommendations),
-            "recommendations": recommendations
+            "num_recommendations": len(paginated_recommendations),
+            "total_recommendations": len(recommendations),
+            "page": request.page,
+            "page_size": request.page_size,
+            "recommendations": paginated_recommendations
         }
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-    
-@app.post('/more_like_this')
+
+
+@app.post("/more_like_this")
 async def get_similar_posts(request:MoreLikeThisRequest):
     try:
-        recommendations = recommender.get_similar_posts(
-            n_recommendations=request.num_recommendations,
-            post_id=request.post_id
-
+        recommendations= recommender.get_similar_posts(
+            post_id=request.post_id,
+            n_recommendations=request.num_recommendations
         )
 
         if not recommendations:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No similar posts found for {request.post_id}"
-            )
+            raise HTTPException(status_code=404, detail="No similar posts found")
 
         return {
-            "post_id": request.post_id,
             "num_recommendations": len(recommendations),
             "recommendations": recommendations
         }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+
+
+    
+@app.post("/trending",  # Changed from "trending_posts" for consistency
+          response_model_exclude_none=True,
+          summary="Get trending posts")
+async def get_trending_posts(request: TrendingRecommendationsRequest):
+    """Get current trending posts based on popularity and recency"""
+    try:
+
+        # popularity_df = pd.read_csv(r"D:\app_square\recommedaiton_engine\recommdder_program\Recommender-Program\pilot_posts2.csv")
+        recommendations = recommender.get_popular_recommendations(
+            n_recommendations=request.num_recommendations,
+            detailed_response=request.detailed_response,
+            # popularity_df=popularity_df
+        )
+
+        if not recommendations:
+            raise HTTPException(status_code=404, detail="No trending posts found")
+
+        return {
+            "num_recommendations": len(recommendations),
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
 
 
 @app.post("/interactions",  # Changed from "add_interaction" for consistency
@@ -190,4 +320,4 @@ async def health_check():
 
 if __name__=="__main__":
     import uvicorn
-    uvicorn.run("main:app",host="127.0.0.1",port=9000,reload=True)
+    uvicorn.run("main:app",host="127.0.0.1",port=8000,reload=True)

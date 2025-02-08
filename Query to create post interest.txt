@@ -1,28 +1,69 @@
 Query to create post_interest_view
 
 CREATE OR REPLACE VIEW post_interest_view AS
-SELECT 
-    p.id AS post_id,
-    p.user_id,
-    p.caption,
-    p.post_reference,
-    p.deleted_at,
-    p.created_at,
-    p.updated_at,
-    p.post_type,
-    p.post_status,
-    LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.description, ' ', '') ORDER BY i.description)) AS processed_categories,
-    LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.name, ' ', '') ORDER BY i.name)) AS processed_subcategories
-FROM posts p
-LEFT JOIN post_categories pc ON p.id = pc.post_id
-LEFT JOIN interests i ON pc.interest_id = i.id
-GROUP BY p.id, p.user_id, p.caption, p.post_reference, p.deleted_at, 
-         p.created_at, p.updated_at, p.post_type, p.post_status
-HAVING processed_categories IS NOT NULL;
 
+SELECT 
+
+    p.id AS post_id,
+
+    p.user_id,
+
+    p.caption,
+
+    p.post_reference,
+
+    p.deleted_at,
+
+    p.created_at,
+
+    p.updated_at,
+
+    p.post_type,
+
+    p.post_status,
+
+    LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.description, ' ', '') ORDER BY i.description)) AS processed_categories,
+
+    LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.name, ' ', '') ORDER BY i.name)) AS processed_subcategories,
+ 
+    -- Get the first asset URL for each post
+
+    (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) AS asset_link,
+ 
+    -- Determine asset type (video or image) based on file extension
+
+    CASE 
+
+        WHEN (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.mp4' THEN 'video'
+
+        WHEN (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.png' 
+
+          OR (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.jpg' 
+
+          OR (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.webp' THEN 'image'
+
+        ELSE NULL
+
+    END AS asset_type
+ 
+FROM posts p
+
+LEFT JOIN post_categories pc ON p.id = pc.post_id
+
+LEFT JOIN interests i ON pc.interest_id = i.id
+
+GROUP BY p.id, p.user_id, p.caption, p.post_reference, p.deleted_at, 
+
+         p.created_at, p.updated_at, p.post_type, p.post_status
+
+HAVING processed_categories IS NOT NULL AND p.deleted_at IS NULL;
+
+ 
 
 
 Query to make the users table
+
+ALTER TABLE users ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
 
 CREATE OR REPLACE VIEW user_followers_following AS
 SELECT 
@@ -42,7 +83,14 @@ SELECT
     COALESCE(GROUP_CONCAT(DISTINCT f2.user_id ORDER BY f2.user_id SEPARATOR ', '), '') AS followers,
 
     -- List of interest categories the user is associated with
-    COALESCE(GROUP_CONCAT(DISTINCT i.name ORDER BY i.name SEPARATOR ', '), '') AS interest_categories
+    COALESCE(GROUP_CONCAT(DISTINCT i.name ORDER BY i.name SEPARATOR ', '), '') AS interest_categories,
+
+    -- Concatenation of followers and following to get connections
+    TRIM(BOTH ', ' FROM CONCAT(
+        COALESCE(GROUP_CONCAT(DISTINCT f.following_id ORDER BY f.following_id SEPARATOR ', '), ''), 
+        ', ', 
+        COALESCE(GROUP_CONCAT(DISTINCT f2.user_id ORDER BY f2.user_id SEPARATOR ', '), '')
+    )) AS connections
 
 FROM 
     (SELECT DISTINCT user_id FROM followers 
