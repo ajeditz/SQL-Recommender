@@ -1,19 +1,25 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Literal, Optional, List, Dict 
 import json
 import pandas as pd
-from recommender import TravelRecommender
+# from recommender import TravelRecommender
+from recommender_inmemory import  TravelRecommender
 import pymysql
+import asyncio
 from sqlalchemy import create_engine
+import logging
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # Database Connection Details
-DB_HOST = "13.247.208.85"
-DB_PORT = "3306"
-DB_DATABASE = "vgtechde_gopaddidbv2"
-DB_USERNAME = "vgtechde_gopaddiv2"
-DB_PASSWORD = "[VZNh-]E%{6q"
+DB_HOST = os.getenv('DB_HOST')
+DB_PORT = os.getenv("DB_PORT")
+DB_DATABASE = os.getenv("DB_DATABASE")
+DB_USERNAME = os.getenv("DB_USERNAME")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 class RecommendationRequest(BaseModel):
     user_id: int = Field(..., description="User ID to get recommendations for")
@@ -45,7 +51,7 @@ class TrendingRecommendationsRequest(BaseModel):
     num_recommendations: int = Field(
         default=10, 
         ge=1, 
-        le=50, 
+        le=1000, 
         description="Number of trending recommendations to return"
     )
     detailed_response:bool =False
@@ -54,7 +60,7 @@ class MoreLikeThisRequest(BaseModel):
     num_recommendations: int = Field(
         default=10, 
         ge=1, 
-        le=50, 
+        le=1000, 
         description="Number of similar posts to return"
     )
     post_id:int
@@ -75,28 +81,59 @@ app = FastAPI(
 )
 
 # Initialize data and recommender
-try:
-    DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
-    engine = create_engine(DATABASE_URL)
+# try:
+#     DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+#     engine = create_engine(DATABASE_URL)
     
-    # Fetch data from RDS MySQL tables
-    posts_df = pd.read_sql("SELECT * FROM post_interest_view", con=engine)
-    interactions_df = pd.read_sql("SELECT * FROM post_activity", con=engine)
-    connections_df = pd.read_sql("SELECT * FROM user_followers_following", con=engine)
+#     # Fetch data from RDS MySQL tables
+#     posts_df = pd.read_sql("SELECT * FROM post_interest_view", con=engine)
+#     interactions_df = pd.read_sql("SELECT * FROM post_activity", con=engine)
+#     connections_df = pd.read_sql("SELECT * FROM user_followers_following", con=engine)
 
-    # Initialize recommender system
-    recommender = TravelRecommender()
-    recommender.update_models(posts_df, interactions_df)
-    recommender.set_user_connections(connections_df)
+#     # Initialize recommender system
+#     recommender = TravelRecommender()
+#     recommender.update_models(posts_df, interactions_df)
+#     recommender.set_user_connections(connections_df)
     
-except Exception as e:
-    print(f"Error initializing recommender: {str(e)}")
-    raise
+# except Exception as e:
+#     print(f"Error initializing recommender: {str(e)}")
+#     raise
+DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+engine = create_engine(DATABASE_URL)
+
+recommender = TravelRecommender()
+
+async def fetch_data():
+    """Periodically fetch fresh data and update the recommender system."""
+    while True:
+        try:
+            logging.info("Fetching fresh data from database...")
+            
+            # Fetch updated tables
+            posts_df = pd.read_sql("SELECT * FROM post_interest_view", con=engine)
+            interactions_df = pd.read_sql("SELECT * FROM post_activity", con=engine)
+            connections_df = pd.read_sql("SELECT * FROM user_followers_following", con=engine)
+
+            # Update recommender models    
+            recommender.update_models(posts_df, interactions_df)
+            recommender.set_user_connections(connections_df)
+
+            logging.info("Recommender system updated successfully.")
+
+        except Exception as e:
+            logging.error(f"Error fetching data: {str(e)}")
+
+        await asyncio.sleep(3600)  # Wait 5 minutes before the next update
+
 
 from datetime import datetime, timedelta
 import json
 
 CACHE_EXPIRY_TIME = timedelta(hours=24)  # Expiry time for recommendations
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(fetch_data())
 
 @app.post("/recommend", response_model_exclude_none=True, summary="Get personalized recommendations")
 async def recommend_posts(request: RecommendationRequest, force_refresh: bool = False):
