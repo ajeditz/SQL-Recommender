@@ -4,6 +4,16 @@ from typing import Literal, Optional, List, Dict
 import json
 import pandas as pd
 from recommender import TravelRecommender
+import pymysql
+from sqlalchemy import create_engine
+
+
+# Database Connection Details
+DB_HOST = "13.247.208.85"
+DB_PORT = "3306"
+DB_DATABASE = "vgtechde_gopaddidbv2"
+DB_USERNAME = "vgtechde_gopaddiv2"
+DB_PASSWORD = "[VZNh-]E%{6q"
 
 class RecommendationRequest(BaseModel):
     user_id: int = Field(..., description="User ID to get recommendations for")
@@ -66,10 +76,15 @@ app = FastAPI(
 
 # Initialize data and recommender
 try:
-    posts_df = pd.read_csv("post_interest_view_cached.csv")
-    interactions_df = pd.read_csv("post_activity_cached.csv")
-    connections_df = pd.read_csv("user_followers_following_cached.csv")
+    DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+    engine = create_engine(DATABASE_URL)
     
+    # Fetch data from RDS MySQL tables
+    posts_df = pd.read_sql("SELECT * FROM post_interest_view", con=engine)
+    interactions_df = pd.read_sql("SELECT * FROM post_activity", con=engine)
+    connections_df = pd.read_sql("SELECT * FROM user_followers_following", con=engine)
+
+    # Initialize recommender system
     recommender = TravelRecommender()
     recommender.update_models(posts_df, interactions_df)
     recommender.set_user_connections(connections_df)
