@@ -407,124 +407,220 @@ class TravelRecommender:
         except Exception as e:
             self.logger.error(f"Error in content-based recommendations: {str(e)}")
             return self.get_popular_recommendations(n_recommendations)
-
+        
+    # @lru_cache(maxsize=128)
+    # def get_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5, detailed_response: bool = True) -> list:
+    #     """Get collaborative recommendations with in-memory caching, ensuring a 4:1 ratio of images to videos."""
+    #     try:
+    #         user_idx = self.get_user_matrix_index(user_id)
+    #         user_similarity = cosine_similarity([self.user_item_matrix[user_idx]], self.user_item_matrix)[0]
+    #         similar_users = [u for u in np.argsort(user_similarity)[::-1] if u != user_idx][:5]
+            
+    #         if not similar_users:
+    #             return self.get_popular_recommendations(n_recommendations, detailed_response)
+            
+    #         similar_user_posts = defaultdict(float)
+    #         for sim_user_idx in similar_users:
+    #             sim_score = user_similarity[sim_user_idx]
+    #             user_ratings = self.user_item_matrix[sim_user_idx]
+    #             for post_idx, rating in enumerate(user_ratings):
+    #                 if rating > 0 and post_idx < len(self.post_features):
+    #                     post_data = self.post_features.iloc[post_idx]
+    #                     recency_score = self.calculate_recency_score(pd.to_datetime(post_data['created_at']))
+    #                     combined_score = (sim_score * 0.4) + (rating * 0.3) + (recency_score * 0.3)
+    #                     similar_user_posts[post_idx] += combined_score
+            
+    #         sorted_posts = sorted(similar_user_posts.items(), key=lambda x: x[1], reverse=True)
+    #         recommendations = [int(self.post_features.iloc[idx]['post_id']) for idx, _ in sorted_posts[:n_recommendations]]
+            
+    #         # Group recommendations into subarrays of 5 posts each
+    #         grouped_recommendations = [recommendations[i:i + 5] for i in range(0, len(recommendations), 5)]
+            
+    #         if detailed_response:
+    #             detailed_recommendations = [[{'post_id': post_id, 'score': float(0), 'type': 'collaborative'} for post_id in group] for group in grouped_recommendations]
+    #             return detailed_recommendations
+    #         return grouped_recommendations
+    #     except Exception as e:
+    #         self.logger.error(f"Error in collaborative recommendations: {str(e)}")
+    #         return self.get_popular_recommendations(n_recommendations, detailed_response)
+    
     @lru_cache(maxsize=128)
     def get_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5, detailed_response: bool = True) -> list:
-        """
-        Get collaborative recommendations with caching.
-
-        Ensures a 4:1 ratio of images to videos if possible but does not force it. 
-        If either category is insufficient, it continues with whatever is available.
-        Falls back to popular recommendations only if total posts are insufficient.
-
-        Parameters:
-        - user_id (int): The ID of the user to get recommendations for.
-        - n_recommendations (int): Number of recommendations to return.
-        - detailed_response (bool): If True, return detailed dictionaries; else, return post IDs.
-
-        Returns:
-        - List of recommended posts (either detailed or IDs).
-        """
+        """Get collaborative recommendations with in-memory caching, ensuring a 4:1 ratio of images to videos."""
         try:
-            # if user_id not in self.user_item_matrix:
-            #     print(f"User {user_id} not found in user-item matrix.")
-
             user_idx = self.get_user_matrix_index(user_id)
-            # print(f"User index: {user_idx}")
-            user_vector = self.user_item_matrix[user_idx]  # This line might be causing the issue
-            # print(f"User vector: {user_vector}")
             user_similarity = cosine_similarity([self.user_item_matrix[user_idx]], self.user_item_matrix)[0]
-            # print(f"User similarity scores for {user_id}: {user_similarity}")
-
             similar_users = [u for u in np.argsort(user_similarity)[::-1] if u != user_idx][:5]
-            # print(f"Similar users for {user_id}: {similar_users}")
-            # for sim_user_idx in similar_users:
-                # print(f"User {sim_user_idx} interacted posts: {np.where(self.user_item_matrix[sim_user_idx] > 0)}")
-
-
+            
             if not similar_users:
                 return self.get_popular_recommendations(n_recommendations, detailed_response)
-
-            similar_user_posts = defaultdict(float)
             
-
+            similar_user_posts = defaultdict(float)
             for sim_user_idx in similar_users:
                 sim_score = user_similarity[sim_user_idx]
                 user_ratings = self.user_item_matrix[sim_user_idx]
-
                 for post_idx, rating in enumerate(user_ratings):
                     if rating > 0 and post_idx < len(self.post_features):
                         post_data = self.post_features.iloc[post_idx]
                         recency_score = self.calculate_recency_score(pd.to_datetime(post_data['created_at']))
-
                         combined_score = (sim_score * 0.4) + (rating * 0.3) + (recency_score * 0.3)
                         similar_user_posts[post_idx] += combined_score
-                # print("Similar user posts are ",similar_user_posts)
-
-            # Sort posts by score
+            
             sorted_posts = sorted(similar_user_posts.items(), key=lambda x: x[1], reverse=True)
-            # print(f"\n\n Sorted posts are {sorted_posts}")
-
-            recommendations, detailed_recommendations = [], []
-            image_count, video_count = 0, 0
-            
-            for post_idx, score in sorted_posts:
-                post_data = self.post_features.iloc[post_idx]
-                post_id = int(post_data['post_id'])
-                # print("THE POST ID TO BE RECOMMENDED",post_id)
-            
-            # Separate posts into image and video categories
             image_posts, video_posts = [], []
+            
             for post_idx, score in sorted_posts:
                 post_data = self.post_features.iloc[post_idx]
                 post_id = int(post_data['post_id'])
-
                 if self.user_item_matrix[user_idx][post_idx] > 0:
-                    continue  # Skip already interacted posts
-
+                    continue
                 if post_data['asset_type'] == 'image':
                     image_posts.append((post_id, score))
-                else:
+                elif post_data['asset_type']=='video':
                     video_posts.append((post_id, score))
+            
+            recommendations, detailed_recommendations = [], []
+            while len(recommendations) < n_recommendations:
+                if len(image_posts) < 4:
+                    required_images = 4 - len(image_posts)
+                    random_images = self.post_features[self.post_features['asset_type'] == 'image'].sample(n=required_images, replace=True)['post_id'].tolist()
+                    image_posts.extend([(img, 0) for img in random_images])
+                if len(video_posts) < 1:
+                    required_videos = 1 - len(video_posts)
+                    random_videos = self.post_features[self.post_features['asset_type'] == 'video'].sample(n=required_videos, replace=True)['post_id'].tolist()
+                    video_posts.extend([(vid, 0) for vid in random_videos])
+                recommendations.extend([image_posts.pop(0)[0] for _ in range(4) if image_posts])
+                if video_posts:
+                    recommendations.append(video_posts.pop(0)[0])
 
-            # recommendations, detailed_recommendations = [], []
-            # image_count, video_count = 0, 0
-
-            while len(recommendations) < n_recommendations and (image_posts or video_posts):
-                if image_count < 4 and image_posts:
-                    post_id, score = image_posts.pop(0)
-                    image_count += 1
-                elif video_count < 1 and video_posts:
-                    post_id, score = video_posts.pop(0)
-                    video_count += 1
-                else:
-                    # If no more videos or images are available, continue recommending whatever is left
-                    if image_posts:
-                        post_id, score = image_posts.pop(0)
-                    elif video_posts:
-                        post_id, score = video_posts.pop(0)
-                    else:
-                        break  # No more posts left to recommend
-
-                recommendations.append(post_id)
-                detailed_recommendations.append({'post_id': post_id, 'score': float(score), 'type': 'collaborative'})
-
-                # Reset counters once we complete a cycle
-                if image_count == 4 and video_count == 1:
-                    image_count, video_count = 0, 0
-
-            # If total recommendations are still insufficient, fallback to popular recommendations
-            if len(recommendations) < n_recommendations:
-                additional_recs = self.get_popular_recommendations(n_recommendations - len(recommendations),detailed_response=True)
-                print(f"Additional recommendations are {additional_recs}")
-                recommendations.extend([rec['post_id'] for rec in additional_recs])
-                detailed_recommendations.extend(additional_recs)
-
-            return detailed_recommendations if detailed_response else recommendations
-
+            grouped_recommendations = [recommendations[i:i + 5] for i in range(0, len(recommendations), 5)]
+            # print("THis is grouped recommendations", grouped_recommendations)
+            if detailed_response:
+                detailed_recommendations = [{'post_id': post_id, 'score': float(0), 'type': 'collaborative'} for post_id in recommendations]
+                return detailed_recommendations
+            return grouped_recommendations
         except Exception as e:
             self.logger.error(f"Error in collaborative recommendations: {str(e)}")
             return self.get_popular_recommendations(n_recommendations, detailed_response)
+        
+
+    # @lru_cache(maxsize=128)
+    # def get_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5, detailed_response: bool = True) -> list:
+    #     """
+    #     Get collaborative recommendations with caching.
+
+    #     Ensures a 4:1 ratio of images to videos if possible but does not force it. 
+    #     If either category is insufficient, it continues with whatever is available.
+    #     Falls back to popular recommendations only if total posts are insufficient.
+
+    #     Parameters:
+    #     - user_id (int): The ID of the user to get recommendations for.
+    #     - n_recommendations (int): Number of recommendations to return.
+    #     - detailed_response (bool): If True, return detailed dictionaries; else, return post IDs.
+
+    #     Returns:
+    #     - List of recommended posts (either detailed or IDs).
+    #     """
+    #     try:
+    #         # if user_id not in self.user_item_matrix:
+    #         #     print(f"User {user_id} not found in user-item matrix.")
+
+    #         user_idx = self.get_user_matrix_index(user_id)
+    #         # print(f"User index: {user_idx}")
+    #         user_vector = self.user_item_matrix[user_idx]  # This line might be causing the issue
+    #         # print(f"User vector: {user_vector}")
+    #         user_similarity = cosine_similarity([self.user_item_matrix[user_idx]], self.user_item_matrix)[0]
+    #         # print(f"User similarity scores for {user_id}: {user_similarity}")
+
+    #         similar_users = [u for u in np.argsort(user_similarity)[::-1] if u != user_idx][:5]
+    #         # print(f"Similar users for {user_id}: {similar_users}")
+    #         # for sim_user_idx in similar_users:
+    #             # print(f"User {sim_user_idx} interacted posts: {np.where(self.user_item_matrix[sim_user_idx] > 0)}")
+
+
+    #         if not similar_users:
+    #             return self.get_popular_recommendations(n_recommendations, detailed_response)
+
+    #         similar_user_posts = defaultdict(float)
+            
+
+    #         for sim_user_idx in similar_users:
+    #             sim_score = user_similarity[sim_user_idx]
+    #             user_ratings = self.user_item_matrix[sim_user_idx]
+
+    #             for post_idx, rating in enumerate(user_ratings):
+    #                 if rating > 0 and post_idx < len(self.post_features):
+    #                     post_data = self.post_features.iloc[post_idx]
+    #                     recency_score = self.calculate_recency_score(pd.to_datetime(post_data['created_at']))
+
+    #                     combined_score = (sim_score * 0.4) + (rating * 0.3) + (recency_score * 0.3)
+    #                     similar_user_posts[post_idx] += combined_score
+    #             # print("Similar user posts are ",similar_user_posts)
+
+    #         # Sort posts by score
+    #         sorted_posts = sorted(similar_user_posts.items(), key=lambda x: x[1], reverse=True)
+    #         # print(f"\n\n Sorted posts are {sorted_posts}")
+
+    #         recommendations, detailed_recommendations = [], []
+    #         image_count, video_count = 0, 0
+            
+    #         for post_idx, score in sorted_posts:
+    #             post_data = self.post_features.iloc[post_idx]
+    #             post_id = int(post_data['post_id'])
+    #             # print("THE POST ID TO BE RECOMMENDED",post_id)
+            
+    #         # Separate posts into image and video categories
+    #         image_posts, video_posts = [], []
+    #         for post_idx, score in sorted_posts:
+    #             post_data = self.post_features.iloc[post_idx]
+    #             post_id = int(post_data['post_id'])
+
+    #             if self.user_item_matrix[user_idx][post_idx] > 0:
+    #                 continue  # Skip already interacted posts
+
+    #             if post_data['asset_type'] == 'image':
+    #                 image_posts.append((post_id, score))
+    #             else:
+    #                 video_posts.append((post_id, score))
+
+    #         # recommendations, detailed_recommendations = [], []
+    #         # image_count, video_count = 0, 0
+
+    #         while len(recommendations) < n_recommendations and (image_posts or video_posts):
+    #             if image_count < 4 and image_posts:
+    #                 post_id, score = image_posts.pop(0)
+    #                 image_count += 1
+    #             elif video_count < 1 and video_posts:
+    #                 post_id, score = video_posts.pop(0)
+    #                 video_count += 1
+    #             else:
+    #                 # If no more videos or images are available, continue recommending whatever is left
+    #                 if image_posts:
+    #                     post_id, score = image_posts.pop(0)
+    #                 elif video_posts:
+    #                     post_id, score = video_posts.pop(0)
+    #                 else:
+    #                     break  # No more posts left to recommend
+
+    #             recommendations.append(post_id)
+    #             detailed_recommendations.append({'post_id': post_id, 'score': float(score), 'type': 'collaborative'})
+
+    #             # Reset counters once we complete a cycle
+    #             if image_count == 4 and video_count == 1:
+    #                 image_count, video_count = 0, 0
+
+    #         # If total recommendations are still insufficient, fallback to popular recommendations
+    #         if len(recommendations) < n_recommendations:
+    #             additional_recs = self.get_popular_recommendations(n_recommendations - len(recommendations),detailed_response=True)
+    #             print(f"Additional recommendations are {additional_recs}")
+    #             recommendations.extend([rec['post_id'] for rec in additional_recs])
+    #             detailed_recommendations.extend(additional_recs)
+
+    #         return detailed_recommendations if detailed_response else recommendations
+
+    #     except Exception as e:
+    #         self.logger.error(f"Error in collaborative recommendations: {str(e)}")
+    #         return self.get_popular_recommendations(n_recommendations, detailed_response)
 
 
     @lru_cache(maxsize=128)

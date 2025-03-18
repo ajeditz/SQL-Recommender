@@ -1,61 +1,55 @@
 Query to create post_interest_view
 
-CREATE OR REPLACE VIEW post_interest_view AS
-
+CREATE OR REPLACE VIEW post_activity_summary AS
 SELECT 
+    content_id AS post_id,
+    COUNT(CASE WHEN activity_type = 'like' THEN 1 END) AS like_count,
+    COUNT(CASE WHEN activity_type = 'comment' THEN 1 END) AS comment_count,
+    COUNT(CASE WHEN activity_type = 'view' THEN 1 END) AS view_count,
+    COUNT(CASE WHEN activity_type = 'share' THEN 1 END) AS share_count
+FROM post_activity
+GROUP BY content_id;
 
+
+CREATE OR REPLACE VIEW post_interest_view AS
+SELECT 
     p.id AS post_id,
-
     p.user_id,
-
     p.caption,
-
     p.post_reference,
-
     p.deleted_at,
-
     p.created_at,
-
     p.updated_at,
-
     p.post_type,
-
     p.post_status,
-
     LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.description, ' ', '') ORDER BY i.description)) AS processed_categories,
-
     LOWER(GROUP_CONCAT(DISTINCT REPLACE(i.name, ' ', '') ORDER BY i.name)) AS processed_subcategories,
- 
+
     -- Get the first asset URL for each post
-
     (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) AS asset_link,
- 
+
     -- Determine asset type (video or image) based on file extension
-
     CASE 
-
         WHEN (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.mp4' THEN 'video'
-
         WHEN (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.png' 
-
           OR (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.jpg' 
-
           OR (SELECT pc.asset FROM post_contents pc WHERE pc.post_id = p.id LIMIT 1) LIKE '%.webp' THEN 'image'
-
         ELSE NULL
+    END AS asset_type,
 
-    END AS asset_type
- 
+    -- Post activity metrics from post_activity_summary
+    COALESCE(pa.like_count, 0) AS like_count,
+    COALESCE(pa.comment_count, 0) AS comment_count,
+    COALESCE(pa.view_count, 0) AS view_count,
+    COALESCE(pa.share_count, 0) AS share_count
+
 FROM posts p
-
 LEFT JOIN post_categories pc ON p.id = pc.post_id
-
 LEFT JOIN interests i ON pc.interest_id = i.id
-
+LEFT JOIN post_activity_summary pa ON p.id = pa.post_id -- Join with activity counts
 GROUP BY p.id, p.user_id, p.caption, p.post_reference, p.deleted_at, 
-
-         p.created_at, p.updated_at, p.post_type, p.post_status
-
+         p.created_at, p.updated_at, p.post_type, p.post_status, pa.like_count, 
+         pa.comment_count, pa.view_count, pa.share_count
 HAVING processed_categories IS NOT NULL AND p.deleted_at IS NULL;
 
  

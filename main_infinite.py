@@ -136,80 +136,36 @@ async def startup_event():
 
 @app.post("/recommend", response_model_exclude_none=True, summary="Get personalized recommendations")
 async def recommend_posts(request: RecommendationRequest, force_refresh: bool = False):
-    """Get personalized hybrid recommendations with caching"""
-
+    """Get personalized hybrid recommendations with circular infinite scrolling."""
     try:
-        # Cache keys
         cache_key = f"recommendations:{request.user_id}:{request.detailed_response}"
-        cache_timestamp_key = f"recommendations_timestamp:{request.user_id}"
-
-        # Check existing cache
         cached_data = recommender._cache_get(cache_key)
-        cache_timestamp = recommender._cache_get(cache_timestamp_key)
-
-        # Convert timestamp from cache
-        cache_time = datetime.fromisoformat(cache_timestamp.decode()) if cache_timestamp else None
-        cache_expired = cache_time and (datetime.utcnow() - cache_time) > CACHE_EXPIRY_TIME
-
-        if force_refresh or not cached_data or cache_expired:
-            # Fetch new recommendations if cache expired or forced refresh
+        
+        if force_refresh or not cached_data:
             recommendations = recommender.get_hybrid_recommendations(
                 user_id=request.user_id,
-                n_recommendations=request.num_recommendations,
+                n_recommendations=100,
                 connection_ratio=request.connection_ratio,
                 max_post_age_days=request.max_post_age_days,
                 detailed_response=request.detailed_response
             )
-
-            # Store in cache
             recommender._cache_set(cache_key, json.dumps(recommendations).encode())
-            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
         else:
-            # Load from cache
-            try:
-                recommendations = json.loads(cached_data)
-            except json.JSONDecodeError:
-                recommender.logger.error("Error decoding cached recommendations")
-                recommendations = []
-
-        # Handle pagination
-        total_available = len(recommendations)
-        start_idx = (request.page - 1) * request.page_size
-        end_idx = start_idx + request.page_size
-
-        if start_idx >= total_available:
-            # If exhausted, fetch fresh recommendations
-            recommendations = recommender.get_hybrid_recommendations(
-                user_id=request.user_id,
-                n_recommendations=request.num_recommendations,
-                connection_ratio=request.connection_ratio,
-                max_post_age_days=request.max_post_age_days,
-                detailed_response=request.detailed_response
-            )
-
-            # Update cache
-            recommender._cache_set(cache_key, json.dumps(recommendations).encode())
-            recommender._cache_set(cache_timestamp_key, datetime.utcnow().isoformat().encode())
-
-            # Reset pagination
-            start_idx, end_idx = 0, request.page_size
-
-        paginated_recommendations = recommendations[start_idx:end_idx]
-
-        if not paginated_recommendations:
-            raise HTTPException(status_code=404, detail=f"No recommendations found for user {request.user_id}")
-
+            recommendations = json.loads(cached_data)
+        
+        if request.last_item_index is not None:
+            next_index = (request.last_item_index + request.num_recommendations) % len(recommendations)
+        else:
+            next_index = request.num_recommendations
+        
+        paginated_recommendations = recommendations[next_index - request.num_recommendations:next_index]
+        
         return {
             "user_id": request.user_id,
             "num_recommendations": len(paginated_recommendations),
-            "total_recommendations": len(recommendations),
-            "page": request.page,
-            "page_size": request.page_size,
+            "next_index": next_index,
             "recommendations": paginated_recommendations
         }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
@@ -371,4 +327,4 @@ async def health_check():
 
 if __name__=="__main__":
     import uvicorn
-    uvicorn.run("main:app",host="127.0.0.1",port=9000,reload=True)
+    uvicorn.run("main:app",host="127.0.0.1",port=8000,reload=True)
